@@ -10,6 +10,7 @@ from chart import chart_builder
 
 from datetime import datetime
 import json
+import urllib.request
 
 from django.db import connection
 
@@ -66,6 +67,8 @@ def get_mattermost_chart(request: HttpRequest):
 def update_mattermost_chart(request: HttpRequest):
     request_body = json.loads(request.body)
     context = request_body['context']
+    post_id = request_body.get('post_id', '')
+    channel_id = request_body.get('channel_id', '')
 
     params: dict[str, Any] = context['params']
     identifiers = params['identifiers']
@@ -73,14 +76,17 @@ def update_mattermost_chart(request: HttpRequest):
 
     chart_response = mattermost_chart(request, identifiers, span)
 
-    chart_response = {
+    if getattr(settings, 'MATTERMOST_API_TOKEN', ''):
+        mattermost_recreate_post(post_id, channel_id, chart_response)
+        return HttpResponse(json.dumps({}), content_type="application/json")
+
+    return HttpResponse(json.dumps({
         "update": {
             "props": {
                 "attachments": chart_response['attachments']
             }
         }
-    }
-    return HttpResponse(json.dumps(chart_response), content_type="application/json")
+    }), content_type="application/json")
 
 def build_stockbot_url(request: HttpRequest, uri: str):
     url = request.build_absolute_uri(uri)
@@ -159,7 +165,9 @@ def stock_info(request: HttpRequest):
     return mattermost_text(response)
 
 def mattermost_action(url: str, name: str, **params):
+    action_id = name.lower().replace(' ', '_')
     return {
+        "id": action_id,
         "name": name.capitalize(),
         "integration": {
             "url": url,
@@ -169,6 +177,36 @@ def mattermost_action(url: str, name: str, **params):
             }
         }
     }
+
+def mattermost_recreate_post(old_post_id: str, channel_id: str, chart_response: dict):
+    api_url = settings.MATTERMOST_API_URL
+    token = settings.MATTERMOST_API_TOKEN
+
+    new_post = {
+        'channel_id': channel_id,
+        'props': {
+            'attachments': chart_response['attachments'],
+            'from_webhook': 'true',
+            'override_username': 'StockBot',
+            'override_icon_url': 'https://imgur.com/zfc1cRc.png',
+        },
+    }
+
+    req = urllib.request.Request(
+        f'{api_url}/api/v4/posts',
+        data=json.dumps(new_post).encode(),
+        method='POST',
+    )
+    req.add_header('Authorization', f'Bearer {token}')
+    req.add_header('Content-Type', 'application/json')
+    urllib.request.urlopen(req)
+
+    req2 = urllib.request.Request(
+        f'{api_url}/api/v4/posts/{old_post_id}',
+        method='DELETE',
+    )
+    req2.add_header('Authorization', f'Bearer {token}')
+    urllib.request.urlopen(req2)
 
 def bool_param(request: HttpRequest, param_name: str) -> bool:
     value = request.GET.get(param_name)
